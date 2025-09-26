@@ -1,5 +1,7 @@
 const express = require('express')
 var cors = require('cors')
+const admin = require('firebase-admin')
+const serviceAccount = require('./firebase_token.json')
 const dotenv = require('dotenv')
 dotenv.config()
 const app = express()
@@ -20,6 +22,19 @@ const client = new MongoClient(uri, {
   }
 });
 
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
+
+
+const verifyFirebaseToken = async (req, res, next) => {
+  const authHeader = req.headers.authorization
+  const token = authHeader.startsWith('Bearer ') && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'No token provided' });
+  const decoded = await admin.auth().verifyIdToken(token);
+  req.user = decoded; // contains uid, email, etc.
+  next()
+}
 
 
 async function run() {
@@ -33,11 +48,17 @@ async function run() {
     // all route here
     const listcollection = client.db("shopX").collection("shopX")
     const categories = client.db("shopX").collection("categories")
+    const cart = client.db("shopX").collection("cart")
 
-    app.get('/', async (req, res) => {
-      const cursor = listcollection.find();
-      const data = await cursor.toArray()
+
+    app.get('/', verifyFirebaseToken, async (req, res) => {
+
+      if(req.user.email) {
+        const cursor = listcollection.find();
+        const data = await cursor.toArray()
       res.send(data)
+      }
+
     })
 
     app.get('/category', async (req, res) => {
@@ -46,40 +67,98 @@ async function run() {
       res.send(data)
     })
 
-    app.get('/test',  (req, res) => {
+    app.get('/test', (req, res) => {
       res.send("Server is running")
     })
 
-    // app.get('/home', async (req, res) => {
-    //   const cursor = listcollection.find({availability : true}).limit(6);
-    //   const data = await cursor.toArray()
-    //   res.send(data)
-    // })
-    
+    app.get('/home', async (req, res) => {
+      const cursor = listcollection.find().limit(16);
+      const data = await cursor.toArray()
+      res.send(data)
+    })
+
 
     app.post('/add', async (req, res) => {
-      const added = await listcollection.insertOne(req.body)
+      const body = req.body;
+
+      // force number type
+      const product = {
+        ...body,
+        price: Number(body.price),
+        stock: Number(body.stock),
+        rating: Number(body.rating),
+        minimumOrderQuantity: Number(body.minimumOrderQuantity),
+        discountPercentage: Number(body.discountPercentage)
+      };
+      const added = await listcollection.insertOne(product)
       res.send(added)
     })
 
     app.get('/myproducts/:email', async (req, res) => {
       const email = req.params.email;
-      const query = {userEmail: email}
+      const query = { userEmail: email }
       const result = await listcollection.find(query).toArray();
       res.send(result)
     })
 
     app.get('/products/:id', async (req, res) => {
       const id = req.params.id;
-      const query = { _id : new ObjectId(id)}
+      const query = { _id: new ObjectId(id) }
       const result = await listcollection.findOne(query);
       res.send(result)
     })
 
-    app.get('/products/:id', async (req, res) => {
+    app.get('/category/:slug', async (req, res) => {
+      const slug1 = req.params.slug;
+      // console.log(slug)
+      const query = { slug: slug1 }
+      const result = await listcollection.find(query).toArray();
+      res.send(result)
+    })
+
+
+    app.patch("/api/products/:id/decrement", async (req, res) => {
+      const { id } = req.params;
+      const { amount } = req.body;
+      const result = await listcollection.updateOne(
+        { _id: new ObjectId(id), stock: { $gt: 0 } }, // prevent negative stock
+        { $inc: { stock: -amount } });
+      // console.log(id, amount)
+      res.send(result)
+    })
+
+    app.patch('/update/:id', async (req, res) => {
       const id = req.params.id;
-      const query = { _id : new ObjectId(id)}
-      const result = await listcollection.findOne(query);
+      const body = req.body;
+
+      // force number type
+      const product = {
+        ...body,
+        price: Number(body.price),
+        stock: Number(body.stock),
+        rating: Number(body.rating),
+        minimumOrderQuantity: Number(body.minimumOrderQuantity),
+        discountPercentage: Number(body.discountPercentage)
+      };
+      const query = { _id: new ObjectId(id) }
+      const lookup = await listcollection.findOne(query);
+      const updatedDoc = {
+        $set: product
+      }
+      const result = await listcollection.updateOne(lookup, updatedDoc)
+      res.send(result)
+    })
+
+
+    app.post('/cart/add', async (req, res) => {
+      const added = await cart.insertOne(req.body)
+      res.send(added)
+    })
+
+    app.get('/cart/:email', async (req, res) => {
+      const email = req.params.email;
+      const query = { userEmail: email }
+      const result = await cart.find(query).toArray();
       res.send(result)
     })
 
@@ -87,26 +166,18 @@ async function run() {
 
     app.delete('/delete/:id', async (req, res) => {
       const id = req.params.id;
-      const query = {_id: new ObjectId(id)}
-      const result = await listcollection.deleteOne(query);
+      const query = { _id: new ObjectId(id) }
+      const result1 = await cart.find(query).toArray();
+      const amount = Number(result1[0].orderQuantity);
+      const result2 = await listcollection.updateOne(
+        { _id: new ObjectId(result1[0].id) },
+        { $inc: { stock: amount } });
+      const result = await cart.deleteOne(query);
       res.send(result)
     })
 
 
 
-    app.patch('/update/:id', async (req, res) => {
-      const id = req.params.id;
-      const query = {_id: new ObjectId(id)}
-      const lookup = await listcollection.findOne(query);
-      const updatedDoc = {
-        $set : req.body
-      }
-      const result = await listcollection.updateOne(lookup, updatedDoc)
-      res.send(result)
-    })
-
-
-    
 
 
 
